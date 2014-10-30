@@ -121,11 +121,7 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 		// parameters map will be stored without change in the AuthorizationRequest object once it is created.
 		AuthorizationRequest authorizationRequest = getOAuth2RequestFactory().createAuthorizationRequest(parameters);
 
-		Set<String> responseTypes = authorizationRequest.getResponseTypes();
-
-		if (!responseTypes.contains("token") && !responseTypes.contains("code")) {
-			throw new UnsupportedResponseTypeException("Unsupported response types: " + responseTypes);
-		}
+		validateResponseType(authorizationRequest);
 
 		if (authorizationRequest.getClientId() == null) {
 			throw new InvalidClientException("A client id must be provided");
@@ -143,6 +139,7 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 			// The resolved redirect URI is either the redirect_uri from the parameters or the one from
 			// clientDetails. Either way we need to store it on the AuthorizationRequest.
 			String redirectUriParameter = authorizationRequest.getRequestParameters().get(OAuth2Utils.REDIRECT_URI);
+
 			String resolvedRedirect = redirectResolver.resolveRedirect(redirectUriParameter, client);
 			if (!StringUtils.hasText(resolvedRedirect)) {
 				throw new RedirectMismatchException(
@@ -164,12 +161,11 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 
 			// Validation is all done, so we can check for auto approval...
 			if (authorizationRequest.isApproved()) {
-				if (responseTypes.contains("token")) {
+				if (isExpectingImplicitGrantResponse(authorizationRequest)) {
 					return getImplicitGrantResponse(authorizationRequest);
 				}
-				if (responseTypes.contains("code")) {
-					return new ModelAndView(getAuthorizationCodeResponse(authorizationRequest,
-							(Authentication) principal));
+				if (isExpectingAuthorizationCodeResponse(authorizationRequest)) {
+					return getAuthorizationCodeResponse(authorizationRequest,(Authentication) principal);
 				}
 			}
 
@@ -185,7 +181,6 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 			sessionStatus.setComplete();
 			throw e;
 		}
-
 	}
 
 	@RequestMapping(value = "/oauth/authorize", method = RequestMethod.POST, params = OAuth2Utils.USER_OAUTH_APPROVAL)
@@ -229,24 +224,31 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 				return getImplicitGrantResponse(authorizationRequest).getView();
 			}
 
-			return getAuthorizationCodeResponse(authorizationRequest, (Authentication) principal);
+			return getAuthorizationCodeResponse(authorizationRequest, (Authentication) principal).getView();
 		}
 		finally {
 			sessionStatus.setComplete();
 		}
-
 	}
 
-	// We need explicit approval from the user.
-	private ModelAndView getUserApprovalPageResponse(Map<String, Object> model,
-			AuthorizationRequest authorizationRequest, Authentication principal) {
-		logger.debug("Loading user approval page: " + userApprovalPage);
-		model.putAll(userApprovalHandler.getUserApprovalRequest(authorizationRequest, principal));
-		return new ModelAndView(userApprovalPage, model);
+
+	protected boolean isExpectingImplicitGrantResponse(AuthorizationRequest authorizationRequest) {
+		return authorizationRequest.getResponseTypes().contains("token");
+	}
+
+	protected boolean isExpectingAuthorizationCodeResponse(AuthorizationRequest authorizationRequest) {
+		return authorizationRequest.getResponseTypes().contains("code");
+	}
+
+	protected void validateResponseType(AuthorizationRequest authorizationRequest) throws UnsupportedResponseTypeException {
+		Set<String> responseTypes = authorizationRequest.getResponseTypes();
+		if (!responseTypes.contains("token") && !responseTypes.contains("code")) {
+			throw new UnsupportedResponseTypeException("Unsupported response types: " + responseTypes);
+		}
 	}
 
 	// We can grant a token and return it with implicit approval.
-	private ModelAndView getImplicitGrantResponse(AuthorizationRequest authorizationRequest) {
+	protected ModelAndView getImplicitGrantResponse(AuthorizationRequest authorizationRequest) {
 		try {
 			TokenRequest tokenRequest = getOAuth2RequestFactory().createTokenRequest(authorizationRequest, "implicit");
 			OAuth2Request storedOAuth2Request = getOAuth2RequestFactory().createOAuth2Request(authorizationRequest);
@@ -254,14 +256,23 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 			if (accessToken == null) {
 				throw new UnsupportedResponseTypeException("Unsupported response type: token");
 			}
-			return new ModelAndView(new RedirectView(appendAccessToken(authorizationRequest, accessToken), false, true,
+			return new ModelAndView(new RedirectView(buildImplicitFragmentUrl(authorizationRequest, accessToken), false, true,
 					false));
 		}
 		catch (OAuth2Exception e) {
 			return new ModelAndView(new RedirectView(getUnsuccessfulRedirect(authorizationRequest, e, true), false,
-					true, false));
+				true, false));
 		}
 	}
+
+	// We need explicit approval from the user.
+	protected ModelAndView getUserApprovalPageResponse(Map<String, Object> model,
+			AuthorizationRequest authorizationRequest, Authentication principal) {
+		logger.debug("Loading user approval page: " + userApprovalPage);
+		model.putAll(userApprovalHandler.getUserApprovalRequest(authorizationRequest, principal));
+		return new ModelAndView(userApprovalPage, model);
+	}
+
 
 	private OAuth2AccessToken getAccessTokenForImplicitGrant(TokenRequest tokenRequest,
 			OAuth2Request storedOAuth2Request) {
@@ -274,17 +285,20 @@ public class AuthorizationEndpoint extends AbstractEndpoint {
 		return accessToken;
 	}
 
-	private View getAuthorizationCodeResponse(AuthorizationRequest authorizationRequest, Authentication authUser) {
+
+	protected ModelAndView getAuthorizationCodeResponse(AuthorizationRequest authorizationRequest, Authentication authUser) {
+		RedirectView view;
 		try {
-			return new RedirectView(getSuccessfulRedirect(authorizationRequest,
-					generateCode(authorizationRequest, authUser)), false, true, false);
+			view = new RedirectView(getSuccessfulRedirect(authorizationRequest,
+				generateCode(authorizationRequest, authUser)), false, true, false);
 		}
 		catch (OAuth2Exception e) {
-			return new RedirectView(getUnsuccessfulRedirect(authorizationRequest, e, false), false, true, false);
+			view = new RedirectView(getUnsuccessfulRedirect(authorizationRequest, e, false), false, true, false);
 		}
+		return new ModelAndView(view);
 	}
 
-	private String appendAccessToken(AuthorizationRequest authorizationRequest, OAuth2AccessToken accessToken) {
+	protected String buildImplicitFragmentUrl(AuthorizationRequest authorizationRequest, OAuth2AccessToken accessToken) {
 
 		Map<String, Object> vars = new HashMap<String, Object>();
 
